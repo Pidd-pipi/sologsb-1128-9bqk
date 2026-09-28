@@ -7,6 +7,29 @@ import type { Berth, BerthStatus } from '../types/berth';
 import type { CallDraft, PortCall } from '../types/call';
 import { buildBerthRecords } from '../db/berth';
 
+/** 泊位冲突原因：提交瞬间泊位现状与表单依据不一致 */
+export type BerthConflictKind =
+  /** 进港：目标泊位不存在 */
+  | 'berth-missing'
+  /** 进港：泊位已不是空闲（被别的船占用或转维修） */
+  | 'berth-not-free'
+  /** 进港：该船已在别处占用泊位 */
+  | 'vessel-already-in'
+  /** 出港：目标泊位未被占用 */
+  | 'berth-not-occupied'
+  /** 出港：占用者不是当前这条船（交接班把别的船占用的泊位分了过来） */
+  | 'occupier-mismatch';
+
+export class BerthConflictError extends Error {
+  kind: BerthConflictKind;
+
+  constructor(kind: BerthConflictKind, message: string) {
+    super(message);
+    this.name = 'BerthConflictError';
+    this.kind = kind;
+  }
+}
+
 export interface PortInput {
   name: string;
   level: FishingPort['level'];
@@ -18,6 +41,35 @@ export interface PortInput {
   shelterLevel: number;
   supply: SupplyCapability;
   manager: string;
+}
+
+/** 提交瞬间按库中现状复核泊位，冲突直接抛错（事务随之中止，什么都不写） */
+function assertBerthAllowed(berth: Berth | undefined, draft: CallDraft, occupiedByVessel: boolean): void {
+  if (draft.type === '进港') {
+    if (!berth) {
+      throw new BerthConflictError('berth-missing', `泊位 ${draft.berthNo} 不存在，请重新选择泊位`);
+    }
+    if (berth.status !== '空闲') {
+      throw new BerthConflictError(
+        'berth-not-free',
+        `泊位 ${berth.berthNo} 刚被${berth.status === '维修' ? '置为维修' : berth.vesselName ? `「${berth.vesselName}」` : '别的船'}占用，请改选空闲泊位`,
+      );
+    }
+    if (occupiedByVessel) {
+      throw new BerthConflictError('vessel-already-in', '该渔船已在港占用泊位，请先办理出港后再登记进港');
+    }
+    return;
+  }
+
+  if (!berth || berth.status !== '占用') {
+    throw new BerthConflictError('berth-not-occupied', `泊位 ${draft.berthNo} 当前并非占用状态，请重新选择泊位`);
+  }
+  if (berth.vesselId !== draft.vesselId) {
+    throw new BerthConflictError(
+      'occupier-mismatch',
+      `泊位 ${berth.berthNo} 的占用者是「${berth.vesselName ?? '别的船'}」，不是当前渔船，请重新选择泊位`,
+    );
+  }
 }
 
 export const usePortStore = defineStore('port', () => {
@@ -50,8 +102,18 @@ export const usePortStore = defineStore('port', () => {
     return berths.value.filter((b) => b.portId === portId).sort((a, b) => a.berthNo.localeCompare(b.berthNo));
   }
 
+  /** 某渔港的进出港流水（与泊位占用同库同源） */
+  function callsOfPort(portId: string): PortCall[] {
+    return callsSorted.value.filter((c) => c.portId === portId);
+  }
+
   function callsOfVessel(vesselId: string): PortCall[] {
     return callsSorted.value.filter((c) => c.vesselId === vesselId);
+  }
+
+  /** 该渔船当前占用的泊位（同一条船至多一条占用记录） */
+  function occupiedBerthOfVessel(vesselId: string): Berth | undefined {
+    return berths.value.find((b) => b.status === '占用' && b.vesselId === vesselId);
   }
 
   function resetFilter(): void {
@@ -68,6 +130,13 @@ export const usePortStore = defineStore('port', () => {
     } finally {
       loading.value = false;
     }
+  }
+
+  /** 仅重拉泊位与流水：交接班后别的标签页 / 值班员可能已改动占用状态 */
+  async function refreshOccupancy(): Promise<void> {
+    const [b, c] = await Promise.all([db.berths.toArray(), db.calls.toArray()]);
+    berths.value = b;
+    calls.value = c;
   }
 
   async function createPort(input: PortInput): Promise<FishingPort> {
@@ -108,6 +177,7 @@ export const usePortStore = defineStore('port', () => {
       vesselName: null,
       berthAt: null,
       leaveAt: null,
+      entryCallId: null,
       status: '空闲',
       designDepth: Number(designDepth) || port.berthDepth,
     };
@@ -128,6 +198,8 @@ export const usePortStore = defineStore('port', () => {
       vesselName: status === '占用' ? hit.vesselName : null,
       berthAt: status === '占用' ? hit.berthAt ?? new Date().toISOString() : hit.berthAt,
       leaveAt: status === '空闲' ? new Date().toISOString() : null,
+      // 人工改状态不经过进出港登记，进港流水关联随之解除
+      entryCallId: status === '占用' ? hit.entryCallId : null,
     };
     await db.berths.put(toPlain(next));
     berths.value = berths.value.map((b) => (b.id === berthId ? next : b));
@@ -142,15 +214,20 @@ export const usePortStore = defineStore('port', () => {
   }
 
   /**
-   * 登记一条进出港记录，并同步泊位占用状态（进港 → 占用，出港 → 释放）。
+   * 登记进出港并同步泊位占用：渔船、时间、渔港与泊位写进同一条流水，
+   * 同时更新泊位占用，二者在同一个 Dexie 事务内完成。
+   * 提交前直接读库复核泊位现状——页面上显示的空闲状态可能是交接班前的旧状态，
+   * 一旦状态已变（泊位被别的船占用 / 占用者不是本船），事务中止、抛出 BerthConflictError，
+   * 调用方应保留草稿并提示重新选择泊位。
    */
-  async function registerCall(draft: CallDraft, vesselName: string, portId: string): Promise<PortCall> {
+  async function registerCall(draft: CallDraft, vesselName: string): Promise<PortCall> {
     const call: PortCall = {
       id: uid('c'),
       vesselId: draft.vesselId,
       vesselName,
       type: draft.type,
       time: draft.time ? new Date(draft.time).toISOString() : new Date().toISOString(),
+      portId: draft.portId,
       berthNo: draft.berthNo,
       iceKg: Number(draft.iceKg) || 0,
       fuelL: Number(draft.fuelL) || 0,
@@ -158,32 +235,44 @@ export const usePortStore = defineStore('port', () => {
       visaStatus: draft.visaStatus,
       createdAt: new Date().toISOString(),
     };
-    await db.calls.put(toPlain(call));
-    calls.value = [...calls.value, call];
 
-    const berth = berths.value.find((b) => b.portId === portId && b.berthNo === draft.berthNo);
-    if (berth) {
-      const next: Berth =
+    await db.transaction('rw', db.calls, db.berths, async () => {
+      // 以库中现状为准，不信任内存里可能过期的状态（旧页面上的空闲/占用跟着提交）
+      const freshBerth = await db.berths.get(`${draft.portId}-${draft.berthNo}`);
+      const occupiedHere = await db.berths
+        .where('vesselId')
+        .equals(draft.vesselId)
+        .filter((b) => b.status === '占用')
+        .first();
+      assertBerthAllowed(freshBerth, draft, Boolean(occupiedHere));
+
+      await db.calls.put(toPlain(call));
+
+      const nextBerth: Berth =
         draft.type === '进港'
           ? {
-              ...berth,
+              ...(freshBerth as Berth),
               status: '占用',
               vesselId: draft.vesselId,
               vesselName,
               berthAt: call.time,
               leaveAt: null,
+              entryCallId: call.id,
             }
           : {
-              ...berth,
+              ...(freshBerth as Berth),
               status: '空闲',
               vesselId: null,
               vesselName: null,
               berthAt: null,
               leaveAt: call.time,
+              entryCallId: null,
             };
-      await db.berths.put(toPlain(next));
-      berths.value = berths.value.map((b) => (b.id === berth.id ? next : b));
-    }
+      await db.berths.put(toPlain(nextBerth));
+    });
+
+    // 事务提交成功后再刷新内存，冲突时保持原状
+    await refreshOccupancy();
     return call;
   }
 
@@ -197,9 +286,12 @@ export const usePortStore = defineStore('port', () => {
     callsSorted,
     portById,
     berthsOf,
+    callsOfPort,
     callsOfVessel,
+    occupiedBerthOfVessel,
     resetFilter,
     loadAll,
+    refreshOccupancy,
     createPort,
     addBerth,
     setBerthStatus,

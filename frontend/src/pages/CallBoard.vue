@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus';
-import { usePortStore } from '../stores/portStore';
+import { usePortStore, BerthConflictError } from '../stores/portStore';
 import { useVesselStore } from '../stores/vesselStore';
 import { useLocalDraft } from '../hooks/useLocalDraft';
 import { useBerthStatus } from '../hooks/useBerthStatus';
@@ -12,17 +12,12 @@ import type { Berth } from '../types/berth';
 import { CALL_TYPES, VISA_STATUSES, emptyCallDraft, type CallDraft, type CallType } from '../types/call';
 import { formatDateTime, formatNumber, isToday, nowLocalInputValue, toPlain } from '../utils/format';
 
-interface CallForm extends CallDraft {
-  portId: string;
-}
-
 const router = useRouter();
 const portStore = usePortStore();
 const vesselStore = useVesselStore();
 
-const { draft, restored, savedAt, storageKey, persist, restore, clearDraft } = useLocalDraft<CallForm>('call-board', () => ({
+const { draft, restored, savedAt, storageKey, persist, restore, clearDraft } = useLocalDraft<CallDraft>('call-board', () => ({
   ...emptyCallDraft(),
-  portId: '',
   time: nowLocalInputValue(),
 }));
 const form = draft;
@@ -30,6 +25,8 @@ const form = draft;
 const formRef = ref<FormInstance>();
 const submitting = ref(false);
 const focusPortId = ref('');
+/** 提交瞬间发现泊位状态已变：保留草稿，横幅提示重选（不清空表单） */
+const conflictMessage = ref('');
 
 const rules: FormRules = {
   vesselId: [{ required: true, message: '请选择渔船', trigger: 'change' }],
@@ -41,11 +38,23 @@ const vesselOptions = computed(() => vesselStore.vessels);
 
 const selectedVessel = computed(() => vesselStore.vesselById(form.value.vesselId));
 
-/** 进港只能选空闲泊位；出港只能选已占用泊位 */
+/** 当前表单所选泊位的实时状态（用于行内提示「页面上的泊位已被别人改动」） */
+const selectedBerth = computed<Berth | undefined>(() =>
+  form.value.portId && form.value.berthNo
+    ? portStore.berths.find((b) => b.portId === form.value.portId && b.berthNo === form.value.berthNo)
+    : undefined,
+);
+
+/**
+ * 泊位候选项与表单类型强绑定，杜绝交接班把别人占用的泊位分给新船：
+ * 进港只能选「此刻空闲」的泊位；出港只能选「此刻正由本船占用」的泊位。
+ */
 const berthOptions = computed(() => {
-  const wanted = form.value.type === '进港' ? '空闲' : '占用';
-  return portStore.berths
-    .filter((b) => b.status === wanted)
+  const list =
+    form.value.type === '进港'
+      ? portStore.berths.filter((b) => b.status === '空闲')
+      : portStore.berths.filter((b) => b.status === '占用' && b.vesselId === form.value.vesselId);
+  return list
     .map((b) => ({
       value: `${b.portId}|${b.berthNo}`,
       label: `${portStore.portById(b.portId)?.name ?? b.portId} · ${b.berthNo}`,
@@ -61,6 +70,7 @@ const berthKey = computed({
     form.value.portId = portId ?? '';
     form.value.berthNo = berthNo ?? '';
     focusPortId.value = portId ?? '';
+    conflictMessage.value = '';
   },
 });
 
@@ -81,7 +91,30 @@ const todayStats = computed(() => ({
   unload: todayCalls.value.reduce((sum, c) => sum + c.unloadKg, 0),
 }));
 
-function hasContent(value: CallForm): boolean {
+/** 选中泊位在页面停留期间被别的值班员改动时的实时提示（仍保留草稿） */
+const liveStatusHint = computed(() => {
+  const berth = selectedBerth.value;
+  if (!berth) return { type: '', text: '' };
+  if (form.value.type === '进港' && berth.status !== '空闲') {
+    const who = berth.status === '维修' ? '该泊位已置为维修' : `该泊位已被「${berth.vesselName ?? '别的船'}」占用`;
+    return { type: 'warning', text: `${who}，提交前请重新选择空闲泊位` };
+  }
+  if (form.value.type === '出港' && (berth.status !== '占用' || berth.vesselId !== form.value.vesselId)) {
+    return {
+      type: 'warning',
+      text:
+        berth.status !== '占用'
+          ? '该泊位已不是占用状态，请重新选择本船占用的泊位'
+          : `该泊位现在的占用者是「${berth.vesselName ?? '别的船'}」，不是当前渔船，请重新选择`,
+    };
+  }
+  if (berth.status === '占用' && form.value.type === '出港') {
+    return { type: 'success', text: `泊位正由「${berth.vesselName ?? ''}」占用，与所选渔船一致` };
+  }
+  return { type: '', text: '' };
+});
+
+function hasContent(value: CallDraft): boolean {
   return (
     Boolean(value.vesselId) ||
     Boolean(value.berthNo) ||
@@ -91,9 +124,21 @@ function hasContent(value: CallForm): boolean {
   );
 }
 
+async function syncFromDb(notify = false): Promise<void> {
+  await portStore.refreshOccupancy();
+  if (notify) ElMessage.info('已按库中最新状态刷新泊位占用');
+}
+
+function onWindowFocus(): void {
+  // 交接班后回到本页：旧页面上的空闲状态可能已过期，重新拉库核对
+  void syncFromDb();
+}
+
 onMounted(async () => {
   if (!portStore.ports.length) await portStore.loadAll();
   if (!vesselStore.vessels.length) await vesselStore.loadAll();
+  window.addEventListener('visibilitychange', onVisibility);
+  window.addEventListener('focus', onWindowFocus);
   if (restore()) {
     if (hasContent(form.value)) {
       ElMessage.info(`已恢复本地草稿（保存于 ${formatDateTime(savedAt.value)}）`);
@@ -105,10 +150,34 @@ onMounted(async () => {
   if (form.value.portId) focusPortId.value = form.value.portId;
 });
 
+onBeforeUnmount(() => {
+  window.removeEventListener('visibilitychange', onVisibility);
+  window.removeEventListener('focus', onWindowFocus);
+});
+
+function onVisibility(): void {
+  if (document.visibilityState === 'visible') void syncFromDb();
+}
+
+// 从库中刷新（交接班后别人改过占用）后，已选泊位可能失效：清掉选择并提示重选，草稿其余内容保留
+watch(
+  () => portStore.berths,
+  () => {
+    if (!berthKey.value) return;
+    const stillValid = berthOptions.value.some((opt) => opt.value === berthKey.value);
+    if (!stillValid) {
+      form.value.portId = '';
+      form.value.berthNo = '';
+      conflictMessage.value = '泊位状态已被改动，请重新选择泊位（草稿其余内容已保留）';
+    }
+  },
+  { deep: false },
+);
+
 watch(
   () => toPlain(form.value),
   (value) => {
-    // 只有存在有效输入时才落草稿；提交后表单被重置，草稿同步清空
+    // 只有存在有效输入时才落草稿；提交后表单被重置，草稿同步清空。冲突时草稿原样保留
     if (hasContent(value)) persist();
     else clearDraft();
   },
@@ -117,13 +186,55 @@ watch(
 
 watch(
   () => form.value.type,
-  (type: CallType) => {
+  () => {
     const valid = berthOptions.value.some((opt) => opt.value === berthKey.value);
-    if (!valid) berthKey.value = '';
+    if (!valid) {
+      form.value.portId = '';
+      form.value.berthNo = '';
+      focusPortId.value = '';
+    }
+    conflictMessage.value = '';
+  },
+);
+
+// 换船后原泊位多半不再合法（尤其出港只认本船占用的泊位），清掉并在出港时自动带出唯一泊位
+watch(
+  () => form.value.vesselId,
+  (vesselId) => {
+    const valid = berthOptions.value.some((opt) => opt.value === berthKey.value);
+    if (!valid) {
+      form.value.portId = '';
+      form.value.berthNo = '';
+      focusPortId.value = '';
+    }
+    if (vesselId && form.value.type === '出港') {
+      const own = portStore.occupiedBerthOfVessel(vesselId);
+      if (own && berthOptions.value.length === 1) {
+        form.value.portId = own.portId;
+        form.value.berthNo = own.berthNo;
+        focusPortId.value = own.portId;
+      }
+    }
+    conflictMessage.value = '';
   },
 );
 
 function selectBerth(berth: Berth): void {
+  if (form.value.type === '进港') {
+    if (berth.status !== '空闲') {
+      ElMessage.warning(`${berth.berthNo} 当前为「${berth.status}」，进港只能选择空闲泊位`);
+      return;
+    }
+  } else if (berth.status !== '占用' || berth.vesselId !== form.value.vesselId) {
+    ElMessage.warning(
+      !form.value.vesselId
+        ? '请先选择出港渔船'
+        : berth.status !== '占用'
+          ? `${berth.berthNo} 当前未被占用，不能办理出港`
+          : `${berth.berthNo} 的占用者是「${berth.vesselName ?? '别的船'}」，不是所选渔船`,
+    );
+    return;
+  }
   berthKey.value = `${berth.portId}|${berth.berthNo}`;
   ElMessage.info(`已选择 ${berth.berthNo}`);
 }
@@ -142,23 +253,31 @@ async function submit(): Promise<void> {
       vesselId: form.value.vesselId,
       type: form.value.type,
       time: form.value.time,
+      portId: form.value.portId,
       berthNo: form.value.berthNo,
       iceKg: Number(form.value.iceKg) || 0,
       fuelL: Number(form.value.fuelL) || 0,
       unloadKg: Number(form.value.unloadKg) || 0,
       visaStatus: form.value.visaStatus,
     };
-    const call = await portStore.registerCall(payload, selectedVessel.value.name, form.value.portId);
-    ElMessage.success(`已登记 ${call.vesselName} ${call.type} · 泊位 ${call.berthNo}`);
+    const call = await portStore.registerCall(payload, selectedVessel.value.name);
+    ElMessage.success(`已登记 ${call.vesselName} ${call.type} · ${portStore.portById(call.portId)?.name ?? ''} 泊位 ${call.berthNo}`);
+    conflictMessage.value = '';
     clearDraft();
     Object.assign(form.value, {
       ...emptyCallDraft(),
-      portId: '',
       time: nowLocalInputValue(),
     });
     focusPortId.value = '';
   } catch (error) {
-    ElMessage.error(`登记失败：${(error as Error).message}`);
+    if (error instanceof BerthConflictError) {
+      // 关键：状态已变就不提交、不清空表单，保留草稿并提示重选
+      conflictMessage.value = error.message;
+      ElMessage.warning(error.message);
+      await syncFromDb();
+    } else {
+      ElMessage.error(`登记失败：${(error as Error).message}`);
+    }
   } finally {
     submitting.value = false;
   }
@@ -175,7 +294,7 @@ function openVessel(vesselId: string): void {
       <div>
         <h1>进出港登记</h1>
         <p class="page__sub">
-          选择渔船与进出港类型，填写泊位号、加冰量、加油量与卸货量，提交后自动同步泊位占用状态
+          渔船、时间与泊位写进同一条记录：进港前核对泊位当下为空，出港前确认本船正是占用者；泊位状态已变时保留草稿并提示重选
         </p>
       </div>
     </header>
@@ -190,9 +309,19 @@ function openVessel(vesselId: string): void {
       class="draft-alert"
     >
       <template #default>
-        草稿保存在 localStorage（键 {{ storageKey }}），提交成功后会清空。
+        草稿保存在 localStorage（键 {{ storageKey }}），提交成功后会清空；泊位状态冲突时草稿会保留。
       </template>
     </el-alert>
+
+    <el-alert
+      v-if="conflictMessage"
+      type="warning"
+      show-icon
+      :closable="false"
+      :title="`泊位状态已变更，登记未提交，草稿已保留：${conflictMessage}`"
+      data-testid="berth-conflict-alert"
+      class="draft-alert"
+    />
 
     <el-row :gutter="16">
       <el-col :lg="13" :md="24">
@@ -231,12 +360,18 @@ function openVessel(vesselId: string): void {
               <el-select
                 id="call-berth"
                 v-model="berthKey"
-                :placeholder="form.type === '进港' ? '选择空闲泊位' : '选择已占用泊位'"
+                :placeholder="form.type === '进港' ? '选择当前空闲的泊位' : '选择本船正占用的泊位'"
                 style="width: 100%"
                 data-testid="call-berth"
               >
                 <el-option v-for="opt in berthOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
               </el-select>
+              <p v-if="form.type === '出港' && form.vesselId && !berthOptions.length" class="field-tip field-tip--warning" data-testid="no-own-berth">
+                该渔船当前没有占用任何泊位，无法办理出港；如确需登记，请先核对渔船或办理进港。
+              </p>
+              <p v-if="liveStatusHint.text" class="field-tip" :class="`field-tip--${liveStatusHint.type}`" data-testid="berth-live-hint">
+                {{ liveStatusHint.text }}
+              </p>
             </el-form-item>
 
             <el-row :gutter="12">
@@ -265,7 +400,8 @@ function openVessel(vesselId: string): void {
 
             <el-form-item>
               <el-button type="primary" :loading="submitting" data-testid="submit-call" @click="submit">保存登记</el-button>
-              <el-button data-testid="clear-draft" @click="clearDraft(); ElMessage.success('草稿已清空')">清空草稿</el-button>
+              <el-button data-testid="clear-draft" @click="conflictMessage = ''; clearDraft(); ElMessage.success('草稿已清空')">清空草稿</el-button>
+              <el-button text data-testid="refresh-berths" @click="syncFromDb(true)">刷新泊位状态</el-button>
               <el-button v-if="selectedVessel" text type="primary" @click="openVessel(selectedVessel.id)">查看渔船档案</el-button>
             </el-form-item>
           </el-form>
@@ -299,6 +435,7 @@ function openVessel(vesselId: string): void {
           <p v-if="focusBerths.length" class="detail-hint">
             占用率 {{ (summary.occupancyRate * 100).toFixed(1) }}% · 占用 {{ summary.occupied }} · 空闲 {{ summary.free }} · 维修 {{ summary.maintenance }}
           </p>
+          <p class="detail-hint">进港点选绿色空闲泊位；出港请点选本船名下的橙色占用泊位。</p>
         </el-card>
       </el-col>
     </el-row>
@@ -306,22 +443,25 @@ function openVessel(vesselId: string): void {
     <el-card shadow="never" class="detail-card">
       <template #header><span class="card-title">今日流水（{{ todayCalls.length }} 条）</span></template>
       <el-table :data="todayCalls" size="small" border empty-text="今日暂无进出港流水" data-testid="today-calls">
-        <el-table-column prop="vesselName" label="船名" min-width="130" />
-        <el-table-column prop="type" label="类型" width="80" />
+        <el-table-column prop="vesselName" label="船名" min-width="120" />
+        <el-table-column label="渔港" min-width="120">
+          <template #default="scope">{{ portStore.portById(scope.row.portId)?.name ?? '—' }}</template>
+        </el-table-column>
+        <el-table-column prop="type" label="类型" width="70" />
         <el-table-column label="时间" min-width="150">
           <template #default="scope">{{ formatDateTime(scope.row.time) }}</template>
         </el-table-column>
-        <el-table-column prop="berthNo" label="泊位号" width="90" />
-        <el-table-column label="加冰 kg" min-width="100">
+        <el-table-column prop="berthNo" label="泊位号" width="80" />
+        <el-table-column label="加冰 kg" min-width="90">
           <template #default="scope">{{ formatNumber(scope.row.iceKg, 0) }}</template>
         </el-table-column>
-        <el-table-column label="加油 L" min-width="100">
+        <el-table-column label="加油 L" min-width="90">
           <template #default="scope">{{ formatNumber(scope.row.fuelL, 0) }}</template>
         </el-table-column>
-        <el-table-column label="卸货 kg" min-width="110">
+        <el-table-column label="卸货 kg" min-width="100">
           <template #default="scope">{{ formatNumber(scope.row.unloadKg, 0) }}</template>
         </el-table-column>
-        <el-table-column prop="visaStatus" label="签证状态" width="110" />
+        <el-table-column prop="visaStatus" label="签证" width="90" />
       </el-table>
     </el-card>
   </section>
@@ -353,6 +493,18 @@ function openVessel(vesselId: string): void {
 }
 .draft-alert {
   border-radius: 10px;
+}
+.field-tip {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #6b7c8c;
+}
+.field-tip--success {
+  color: #529b2e;
+}
+.field-tip--warning {
+  color: #b88230;
 }
 .stat-row {
   display: flex;

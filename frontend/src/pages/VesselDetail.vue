@@ -6,8 +6,10 @@ import { usePortStore } from '../stores/portStore';
 import VesselSpecTable from '../components/common/VesselSpecTable.vue';
 import EmptyState from '../components/common/EmptyState.vue';
 import type { PortCall } from '../types/call';
+import { DETENTION_HOURS } from '../types/berth';
 import { daysUntilExpiry, expiryText, powerTier, tonnageTier } from '../utils/tonnage';
 import { formatDateTime, formatNumber } from '../utils/format';
+import { durationText, isDetained } from '../utils/occupancy';
 
 const route = useRoute();
 const router = useRouter();
@@ -22,14 +24,18 @@ const calls = computed<PortCall[]>(() => (vessel.value ? portStore.callsOfVessel
 
 const occupancy = computed(() => {
   if (!vessel.value) return [] as Array<{ portName: string; berthNo: string; berthAt: string | null }>;
+  // 与渔港详情、泊位格读的是同一条 berths 占用记录
   return portStore.berths
     .filter((b) => b.vesselId === vessel.value!.id && b.status === '占用')
     .map((b) => ({
+      id: b.id,
       portName: portStore.portById(b.portId)?.name ?? b.portId,
       berthNo: b.berthNo,
       berthAt: b.berthAt,
     }));
 });
+
+const detained = computed(() => occupancy.value.some((o) => isDetained(o.berthAt)));
 
 const expiryDays = computed(() => (vessel.value ? daysUntilExpiry(vessel.value.certificateExpiry) : Number.NaN));
 
@@ -111,11 +117,29 @@ watch(vesselId, bootstrap);
 
           <el-card shadow="never" class="detail-card">
             <template #header><span class="card-title">当前泊位</span></template>
-            <el-table :data="occupancy" size="small" border empty-text="该船当前不在港">
-              <el-table-column prop="portName" label="渔港" min-width="130" />
-              <el-table-column prop="berthNo" label="泊位号" width="90" />
-              <el-table-column label="靠泊时间" min-width="150">
+            <el-alert
+              v-if="detained"
+              type="error"
+              show-icon
+              :closable="false"
+              class="vessel-detention"
+              data-testid="vessel-detained-alert"
+              :title="`该船靠泊已超过 ${DETENTION_HOURS} 小时，请核实滞留原因`"
+            />
+            <el-table :data="occupancy" size="small" border empty-text="该船当前不在港" data-testid="vessel-occupancy">
+              <el-table-column prop="portName" label="渔港" min-width="120" />
+              <el-table-column prop="berthNo" label="泊位号" width="80" />
+              <el-table-column label="靠泊起始" min-width="140">
                 <template #default="scope">{{ formatDateTime(scope.row.berthAt) }}</template>
+              </el-table-column>
+              <el-table-column label="靠泊时长" min-width="105">
+                <template #default="scope">{{ durationText(scope.row.berthAt) }}</template>
+              </el-table-column>
+              <el-table-column label="状态" width="80">
+                <template #default="scope">
+                  <el-tag v-if="isDetained(scope.row.berthAt)" size="small" type="danger">滞留</el-tag>
+                  <el-tag v-else size="small" type="success">正常</el-tag>
+                </template>
               </el-table-column>
             </el-table>
           </el-card>
@@ -197,5 +221,8 @@ watch(vesselId, bootstrap);
   flex-wrap: wrap;
   font-size: 13px;
   color: #4b5c6d;
+}
+.vessel-detention {
+  margin-bottom: 10px;
 }
 </style>

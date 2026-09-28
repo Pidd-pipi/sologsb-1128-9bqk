@@ -9,6 +9,7 @@ import MapPanel from '../components/common/MapPanel.vue';
 import EmptyState from '../components/common/EmptyState.vue';
 import type { Berth } from '../types/berth';
 import { formatDateTime, percentText } from '../utils/format';
+import { durationText, isDetained } from '../utils/occupancy';
 import { haversineKm } from '../utils/geo';
 
 const router = useRouter();
@@ -149,10 +150,19 @@ function openPortDetail(): void {
 
         <p class="dialog-sub">在港船舶</p>
         <el-table :data="activeSummary.occupiedBerths" size="small" border empty-text="当前无在港船舶" data-testid="summary-inport-table">
-          <el-table-column prop="berthNo" label="泊位号" width="90" />
-          <el-table-column prop="vesselName" label="船名" min-width="130" />
-          <el-table-column label="靠泊时间" min-width="160">
+          <el-table-column prop="berthNo" label="泊位号" width="80" />
+          <el-table-column prop="vesselName" label="船名" min-width="120" />
+          <el-table-column label="靠泊起始" min-width="140">
             <template #default="scope">{{ formatDateTime(scope.row.berthAt) }}</template>
+          </el-table-column>
+          <el-table-column label="靠泊时长" min-width="100">
+            <template #default="scope">{{ durationText(scope.row.berthAt) }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="76">
+            <template #default="scope">
+              <el-tag v-if="isDetained(scope.row.berthAt)" size="small" type="danger">滞留</el-tag>
+              <el-tag v-else size="small" type="success">正常</el-tag>
+            </template>
           </el-table-column>
         </el-table>
 

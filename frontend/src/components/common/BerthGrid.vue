@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import type { Berth, BerthStatus } from '../../types/berth';
-import { formatNumber } from '../../utils/format';
+import { DETENTION_HOURS } from '../../types/berth';
+import { formatDateTime, formatNumber } from '../../utils/format';
+import { durationShort, isDetained } from '../../utils/occupancy';
 
 const props = withDefaults(
   defineProps<{
@@ -44,10 +46,38 @@ const legend = computed(() =>
   })),
 );
 
+/** 超 48 小时滞留的占用泊位数（与渔港详情、渔船档案同一口径） */
+const detainedCount = computed(
+  () => props.berths.filter((b) => b.status === '占用' && isDetained(b.berthAt)).length,
+);
+
 function cellAt(index: number): { x: number; y: number } {
   const row = Math.floor(index / props.perRow);
   const col = index % props.perRow;
   return { x: PAD + col * (CELL_W + GAP), y: PAD + row * (CELL_H + GAP) };
+}
+
+function strokeColor(berth: Berth): string {
+  if (berth.status === '占用' && isDetained(berth.berthAt)) return '#f56c6c';
+  if (props.highlightBerthNo === berth.berthNo) return '#409eff';
+  return COLORS[berth.status];
+}
+
+function strokeWidth(berth: Berth): number {
+  if (berth.status === '占用' && isDetained(berth.berthAt)) return 2.5;
+  return props.highlightBerthNo === berth.berthNo ? 3 : 1.5;
+}
+
+function cellTitle(berth: Berth): string {
+  const parts = [`${berth.berthNo} · ${berth.status}`];
+  if (berth.status === '占用') {
+    parts.push(berth.vesselName || '未知船舶');
+    parts.push(`靠泊自 ${formatDateTime(berth.berthAt)}`);
+    if (isDetained(berth.berthAt)) parts.push(`已滞留（超过 ${DETENTION_HOURS} 小时）`);
+  } else {
+    parts.push(`水深 ${formatNumber(berth.designDepth)}m`);
+  }
+  return parts.join(' · ');
 }
 
 function onSelect(berth: Berth): void {
@@ -70,17 +100,18 @@ function onSelect(berth: Berth): void {
           :width="CELL_W"
           :height="CELL_H"
           rx="10"
-          :fill="FILLS[berth.status]"
-          :stroke="highlightBerthNo === berth.berthNo ? '#409eff' : COLORS[berth.status]"
-          :stroke-width="highlightBerthNo === berth.berthNo ? 3 : 1.5"
+          :fill="berth.status === '占用' && isDetained(berth.berthAt) ? '#fef0f0' : FILLS[berth.status]"
+          :stroke="strokeColor(berth)"
+          :stroke-width="strokeWidth(berth)"
           class="berth-grid__cell"
           :class="{ 'berth-grid__cell--selectable': selectable }"
           :data-testid="`berth-cell-${berth.berthNo}`"
           :data-berth-no="berth.berthNo"
           :data-status="berth.status"
+          :data-detained="berth.status === '占用' && isDetained(berth.berthAt) ? 'true' : 'false'"
           @click="onSelect(berth)"
         >
-          <title>{{ `${berth.berthNo} · ${berth.status}${berth.vesselName ? ' · ' + berth.vesselName : ''}` }}</title>
+          <title>{{ cellTitle(berth) }}</title>
         </rect>
         <text
           :x="cellAt(index).x + 12"
@@ -90,11 +121,26 @@ function onSelect(berth: Berth): void {
         >
           {{ berth.berthNo }}
         </text>
-        <text :x="cellAt(index).x + 12" :y="cellAt(index).y + 46" class="berth-grid__meta">
+        <!-- 占用格显示靠泊起始时间（与渔港详情、渔船档案同一笔泊位记录） -->
+        <text v-if="berth.status === '占用'" :x="cellAt(index).x + 12" :y="cellAt(index).y + 45" class="berth-grid__meta">
+          {{ formatDateTime(berth.berthAt) }}
+        </text>
+        <text v-else :x="cellAt(index).x + 12" :y="cellAt(index).y + 46" class="berth-grid__meta">
           {{ berth.status }} · 水深 {{ formatNumber(berth.designDepth) }}m
         </text>
-        <text :x="cellAt(index).x + 12" :y="cellAt(index).y + 64" class="berth-grid__vessel">
+        <text :x="cellAt(index).x + 12" :y="cellAt(index).y + 63" class="berth-grid__vessel">
           {{ berth.status === '占用' ? berth.vesselName || '未知船舶' : '—' }}
+        </text>
+        <text
+          v-if="berth.status === '占用' && durationShort(berth.berthAt)"
+          :x="cellAt(index).x + CELL_W - 10"
+          :y="cellAt(index).y + 63"
+          text-anchor="end"
+          class="berth-grid__duration"
+          :class="{ 'berth-grid__duration--detained': isDetained(berth.berthAt) }"
+          :data-testid="`berth-duration-${berth.berthNo}`"
+        >
+          {{ isDetained(berth.berthAt) ? `滞留 ${durationShort(berth.berthAt)}` : durationShort(berth.berthAt) }}
         </text>
       </g>
     </svg>
@@ -102,6 +148,10 @@ function onSelect(berth: Berth): void {
       <span v-for="item in legend" :key="item.status" class="berth-grid__legend-item">
         <i class="berth-grid__dot" :style="{ background: item.color }"></i>
         {{ item.status }} {{ item.count }}
+      </span>
+      <span v-if="detainedCount > 0" class="berth-grid__legend-item" data-testid="berth-grid-detained">
+        <i class="berth-grid__dot berth-grid__dot--detained"></i>
+        滞留（&gt;{{ DETENTION_HOURS }}h）{{ detainedCount }}
       </span>
     </div>
   </div>
@@ -130,12 +180,20 @@ function onSelect(berth: Berth): void {
   fill: #17324d;
 }
 .berth-grid__meta {
-  font-size: 11px;
+  font-size: 10px;
   fill: #6b7c8c;
 }
 .berth-grid__vessel {
   font-size: 11px;
   fill: #3d5670;
+}
+.berth-grid__duration {
+  font-size: 10px;
+  font-weight: 600;
+  fill: #b88230;
+}
+.berth-grid__duration--detained {
+  fill: #f56c6c;
 }
 .berth-grid__legend {
   display: flex;
@@ -154,5 +212,8 @@ function onSelect(berth: Berth): void {
   height: 9px;
   border-radius: 50%;
   display: inline-block;
+}
+.berth-grid__dot--detained {
+  background: #f56c6c;
 }
 </style>

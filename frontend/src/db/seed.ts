@@ -4,14 +4,7 @@ import type { PortCall } from '../types/call';
 import { toPlain } from '../utils/format';
 import { db } from './index';
 import { buildBerthRecords } from './berth';
-
-function hoursAgo(hours: number): string {
-  return new Date(Date.now() - hours * 3600 * 1000).toISOString();
-}
-
-function daysAgo(days: number): string {
-  return new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
-}
+import { daysAgo, hoursAgo } from './seed-time';
 
 /** 初始渔港 */
 export const SEED_PORTS: FishingPort[] = [
@@ -167,7 +160,7 @@ export const SEED_VESSELS: FishingVessel[] = [
   },
 ];
 
-/** 初始进出港流水 */
+/** 初始进出港流水（进港流水即靠泊起始记录，与 berths 中的占用一一对应） */
 export const SEED_CALLS: PortCall[] = [
   {
     id: 'c-3001',
@@ -175,6 +168,7 @@ export const SEED_CALLS: PortCall[] = [
     vesselName: '浙象渔05123',
     type: '进港',
     time: hoursAgo(5),
+    portId: 'p-1001',
     berthNo: 'B01',
     iceKg: 1200,
     fuelL: 800,
@@ -188,6 +182,7 @@ export const SEED_CALLS: PortCall[] = [
     vesselName: '浙象渔05288',
     type: '进港',
     time: hoursAgo(3),
+    portId: 'p-1001',
     berthNo: 'B02',
     iceKg: 900,
     fuelL: 1200,
@@ -201,6 +196,7 @@ export const SEED_CALLS: PortCall[] = [
     vesselName: '浙普渔13208',
     type: '进港',
     time: hoursAgo(2),
+    portId: 'p-1002',
     berthNo: 'B01',
     iceKg: 600,
     fuelL: 0,
@@ -214,6 +210,7 @@ export const SEED_CALLS: PortCall[] = [
     vesselName: '浙岱渔07156',
     type: '进港',
     time: hoursAgo(1),
+    portId: 'p-1003',
     berthNo: 'B01',
     iceKg: 300,
     fuelL: 260,
@@ -226,26 +223,28 @@ export const SEED_CALLS: PortCall[] = [
     vesselId: 'v-2004',
     vesselName: '浙岭渔09342',
     type: '出港',
-    time: daysAgo(1),
+    time: daysAgo(3),
+    portId: 'p-1004',
     berthNo: 'B02',
     iceKg: 0,
     fuelL: 420,
     unloadKg: 0,
     visaStatus: '已签证',
-    createdAt: daysAgo(1),
+    createdAt: daysAgo(3),
   },
   {
     id: 'c-3006',
     vesselId: 'v-2006',
     vesselName: '浙普渔13566',
     type: '进港',
-    time: daysAgo(1),
+    time: hoursAgo(52),
+    portId: 'p-1002',
     berthNo: 'B02',
     iceKg: 480,
     fuelL: 300,
     unloadKg: 3600,
     visaStatus: '已签证',
-    createdAt: daysAgo(1),
+    createdAt: hoursAgo(52),
   },
   {
     id: 'c-3007',
@@ -253,6 +252,7 @@ export const SEED_CALLS: PortCall[] = [
     vesselName: '浙象渔05123',
     type: '出港',
     time: daysAgo(2),
+    portId: 'p-1001',
     berthNo: 'B01',
     iceKg: 0,
     fuelL: 950,
@@ -266,12 +266,27 @@ export const SEED_CALLS: PortCall[] = [
     vesselName: '浙普渔13208',
     type: '出港',
     time: daysAgo(4),
+    portId: 'p-1002',
     berthNo: 'B03',
     iceKg: 200,
     fuelL: 540,
     unloadKg: 0,
     visaStatus: '待签证',
     createdAt: daysAgo(4),
+  },
+  {
+    id: 'c-3009',
+    vesselId: 'v-2004',
+    vesselName: '浙岭渔09342',
+    type: '进港',
+    time: hoursAgo(6),
+    portId: 'p-1004',
+    berthNo: 'B02',
+    iceKg: 260,
+    fuelL: 180,
+    unloadKg: 1500,
+    visaStatus: '已签证',
+    createdAt: hoursAgo(6),
   },
 ];
 

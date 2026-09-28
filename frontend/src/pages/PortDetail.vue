@@ -10,7 +10,9 @@ import BerthGrid from '../components/common/BerthGrid.vue';
 import MapPanel from '../components/common/MapPanel.vue';
 import EmptyState from '../components/common/EmptyState.vue';
 import type { Berth } from '../types/berth';
+import { DETENTION_HOURS } from '../types/berth';
 import { formatDateTime, formatNumber, percentText } from '../utils/format';
+import { durationText, isDetained } from '../utils/occupancy';
 import { supplyText } from '../types/port';
 
 const route = useRoute();
@@ -36,10 +38,15 @@ const activeVessel = computed(() =>
 const addBerthVisible = ref(false);
 const addBerthForm = reactive({ berthNo: '', designDepth: 4.5 });
 
-const recentCalls = computed(() => {
-  const numbers = new Set(portBerths.value.map((b) => b.berthNo));
-  return portStore.callsSorted.filter((c) => numbers.has(c.berthNo)).slice(0, 8);
-});
+/** 近日流水直接按渔港 id 过滤，避免不同渔港的同号泊位串单 */
+const recentCalls = computed(() => portStore.callsOfPort(portId.value).slice(0, 8));
+
+/** 靠泊超过 48 小时的在港船舶（按滞留时长降序） */
+const detainedBerths = computed(() =>
+  inPortVessels.value
+    .filter((b) => isDetained(b.berthAt))
+    .sort((a, b) => new Date(a.berthAt ?? 0).getTime() - new Date(b.berthAt ?? 0).getTime()),
+);
 
 const supply = computed(() => (port.value ? supplyText(port.value.supply) : '—'));
 
@@ -121,6 +128,24 @@ function onMapSelect(selectedPortId: string): void {
         </div>
       </header>
 
+      <el-alert
+        v-if="detainedBerths.length"
+        type="error"
+        show-icon
+        :closable="false"
+        class="detention-alert"
+        data-testid="detention-alert"
+      >
+        <template #title>
+          滞留提示：{{ detainedBerths.length }} 艘船靠泊已超过 {{ DETENTION_HOURS }} 小时
+        </template>
+        <template #default>
+          <span v-for="(b, i) in detainedBerths" :key="b.id" class="detention-chip">
+            {{ i > 0 ? '、' : '' }}{{ b.vesselName }}（{{ b.berthNo }} · {{ durationText(b.berthAt) }}）
+          </span>
+        </template>
+      </el-alert>
+
       <el-row :gutter="16">
         <el-col :lg="10" :md="24">
           <PortCard :port="port" :summary="summaryOf(port.id)" :clickable="false" />
@@ -158,7 +183,7 @@ function onMapSelect(selectedPortId: string): void {
 
       <el-card shadow="never" class="detail-card">
         <template #header>
-          <span class="card-title">泊位网格（点击泊位查看占用船舶）</span>
+          <span class="card-title">泊位网格（点击泊位查看占用船舶，红框为滞留超过 {{ DETENTION_HOURS }} 小时）</span>
         </template>
         <BerthGrid v-if="portBerths.length" :berths="portBerths" @select="openBerth" />
         <EmptyState v-else title="该渔港暂无泊位记录" description="点击右上角「新增泊位」为该渔港建立泊位清单。">
@@ -169,14 +194,32 @@ function onMapSelect(selectedPortId: string): void {
       <el-row :gutter="16">
         <el-col :lg="12" :md="24">
           <el-card shadow="never" class="detail-card">
-            <template #header><span class="card-title">在港船舶（{{ inPortVessels.length }} 艘）</span></template>
-            <el-table :data="inPortVessels" size="small" border empty-text="当前无在港船舶">
-              <el-table-column prop="vesselName" label="船名" min-width="120" />
-              <el-table-column prop="berthNo" label="泊位号" width="90" />
-              <el-table-column label="靠泊时间" min-width="150">
+            <template #header>
+              <span class="card-title">在港船舶（{{ inPortVessels.length }} 艘）</span>
+            </template>
+            <el-table :data="inPortVessels" size="small" border empty-text="当前无在港船舶" data-testid="inport-table">
+              <el-table-column prop="vesselName" label="船名" min-width="115" />
+              <el-table-column prop="berthNo" label="泊位号" width="80" />
+              <el-table-column label="靠泊起始" min-width="140">
                 <template #default="scope">{{ formatDateTime(scope.row.berthAt) }}</template>
               </el-table-column>
-              <el-table-column label="操作" width="100">
+              <el-table-column label="靠泊时长" min-width="105">
+                <template #default="scope">{{ durationText(scope.row.berthAt) }}</template>
+              </el-table-column>
+              <el-table-column label="状态" width="84">
+                <template #default="scope">
+                  <el-tag
+                    v-if="isDetained(scope.row.berthAt)"
+                    size="small"
+                    type="danger"
+                    data-testid="detained-tag"
+                  >
+                    滞留
+                  </el-tag>
+                  <el-tag v-else size="small" type="success">正常</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="78">
                 <template #default="scope">
                   <el-button
                     text
@@ -238,7 +281,22 @@ function onMapSelect(selectedPortId: string): void {
             </template>
             <template v-else>—</template>
           </el-descriptions-item>
-          <el-descriptions-item label="靠泊时间">{{ formatDateTime(activeBerth.berthAt) }}</el-descriptions-item>
+          <el-descriptions-item label="靠泊起始时间">{{ formatDateTime(activeBerth.berthAt) }}</el-descriptions-item>
+          <el-descriptions-item label="靠泊时长">
+            <template v-if="activeBerth.status === '占用'">
+              {{ durationText(activeBerth.berthAt) }}
+              <el-tag
+                v-if="isDetained(activeBerth.berthAt)"
+                size="small"
+                type="danger"
+                style="margin-left: 6px"
+                data-testid="berth-detained-tag"
+              >
+                滞留（超过 {{ DETENTION_HOURS }} 小时）
+              </el-tag>
+            </template>
+            <template v-else>—</template>
+          </el-descriptions-item>
           <el-descriptions-item label="离泊时间">{{ formatDateTime(activeBerth.leaveAt) }}</el-descriptions-item>
           <el-descriptions-item label="主机功率">
             {{ activeVessel ? `${formatNumber(activeVessel.enginePower, 0)} kW` : '—' }}
@@ -302,6 +360,13 @@ function onMapSelect(selectedPortId: string): void {
 .detail-card {
   border-radius: 10px;
   margin-bottom: 16px;
+}
+.detention-alert {
+  border-radius: 10px;
+  margin-bottom: 0;
+}
+.detention-chip {
+  font-size: 12px;
 }
 .card-title {
   font-weight: 600;
