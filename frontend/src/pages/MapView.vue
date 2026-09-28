@@ -8,6 +8,7 @@ import { useBerthStatus } from '../hooks/useBerthStatus';
 import MapPanel from '../components/common/MapPanel.vue';
 import EmptyState from '../components/common/EmptyState.vue';
 import type { Berth } from '../types/berth';
+import { berthedDurationText, isOverstay } from '../types/berth';
 import { formatDateTime, percentText } from '../utils/format';
 import { haversineKm } from '../utils/geo';
 
@@ -147,12 +148,30 @@ function openPortDetail(): void {
           <el-descriptions-item label="维修泊位">{{ activeSummary.maintenance }}</el-descriptions-item>
         </el-descriptions>
 
-        <p class="dialog-sub">在港船舶</p>
+        <p class="dialog-sub">
+          在港船舶
+          <el-tag v-if="activeSummary.overstayCount" type="danger" size="small" effect="dark" style="margin-left: 8px">
+            {{ activeSummary.overstayCount }} 艘滞留超 48 小时
+          </el-tag>
+        </p>
         <el-table :data="activeSummary.occupiedBerths" size="small" border empty-text="当前无在港船舶" data-testid="summary-inport-table">
-          <el-table-column prop="berthNo" label="泊位号" width="90" />
-          <el-table-column prop="vesselName" label="船名" min-width="130" />
-          <el-table-column label="靠泊时间" min-width="160">
+          <el-table-column prop="berthNo" label="泊位号" width="80" />
+          <el-table-column prop="vesselName" label="船名" min-width="120" />
+          <el-table-column label="靠泊起始时间" min-width="150">
             <template #default="scope">{{ formatDateTime(scope.row.berthAt) }}</template>
+          </el-table-column>
+          <el-table-column label="靠泊时长" min-width="110">
+            <template #default="scope">
+              <span :class="{ 'overstay-text': isOverstay(scope.row.berthAt) }">
+                {{ berthedDurationText(scope.row.berthAt) }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="scope">
+              <el-tag v-if="isOverstay(scope.row.berthAt)" type="danger" size="small">滞留超48小时</el-tag>
+              <el-tag v-else type="success" size="small" effect="plain">在港</el-tag>
+            </template>
           </el-table-column>
         </el-table>
 
@@ -259,5 +278,9 @@ function openPortDetail(): void {
 .free-berths__empty {
   font-size: 12px;
   color: #9aa9b6;
+}
+.overstay-text {
+  color: #f56c6c;
+  font-weight: 600;
 }
 </style>

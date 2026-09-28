@@ -6,6 +6,7 @@ import { usePortStore } from '../stores/portStore';
 import VesselSpecTable from '../components/common/VesselSpecTable.vue';
 import EmptyState from '../components/common/EmptyState.vue';
 import type { PortCall } from '../types/call';
+import { berthedDurationText, isOverstay } from '../types/berth';
 import { daysUntilExpiry, expiryText, powerTier, tonnageTier } from '../utils/tonnage';
 import { formatDateTime, formatNumber } from '../utils/format';
 
@@ -21,13 +22,18 @@ const loaded = ref(false);
 const calls = computed<PortCall[]>(() => (vessel.value ? portStore.callsOfVessel(vessel.value.id) : []));
 
 const occupancy = computed(() => {
-  if (!vessel.value) return [] as Array<{ portName: string; berthNo: string; berthAt: string | null }>;
+  if (!vessel.value) {
+    return [] as Array<{ portName: string; berthNo: string; berthAt: string | null; duration: string; overstay: boolean }>;
+  }
+  // 与渔港列表、泊位格读的是同一条泊位占用记录（entryCallId 指向本船的进港流水）
   return portStore.berths
     .filter((b) => b.vesselId === vessel.value!.id && b.status === '占用')
     .map((b) => ({
       portName: portStore.portById(b.portId)?.name ?? b.portId,
       berthNo: b.berthNo,
       berthAt: b.berthAt,
+      duration: berthedDurationText(b.berthAt),
+      overstay: isOverstay(b.berthAt),
     }));
 });
 
@@ -110,12 +116,43 @@ watch(vesselId, bootstrap);
           </el-card>
 
           <el-card shadow="never" class="detail-card">
-            <template #header><span class="card-title">当前泊位</span></template>
-            <el-table :data="occupancy" size="small" border empty-text="该船当前不在港">
+            <template #header>
+              <span class="card-title">当前泊位</span>
+              <el-tag
+                v-if="occupancy.some((o) => o.overstay)"
+                type="danger"
+                size="small"
+                effect="dark"
+                class="overstay-tag"
+                data-testid="vessel-overstay-tag"
+              >
+                滞留超 48 小时
+              </el-tag>
+            </template>
+            <el-alert
+              v-if="occupancy.some((o) => o.overstay)"
+              type="error"
+              :closable="false"
+              show-icon
+              class="overstay-alert"
+              title="该船靠泊已超过 48 小时，请跟进滞留情况"
+            />
+            <el-table :data="occupancy" size="small" border empty-text="该船当前不在港" data-testid="vessel-berth-table">
               <el-table-column prop="portName" label="渔港" min-width="130" />
               <el-table-column prop="berthNo" label="泊位号" width="90" />
-              <el-table-column label="靠泊时间" min-width="150">
+              <el-table-column label="靠泊起始时间" min-width="150">
                 <template #default="scope">{{ formatDateTime(scope.row.berthAt) }}</template>
+              </el-table-column>
+              <el-table-column label="靠泊时长" min-width="120">
+                <template #default="scope">
+                  <span :class="{ 'overstay-text': scope.row.overstay }">{{ scope.row.duration }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="100">
+                <template #default="scope">
+                  <el-tag v-if="scope.row.overstay" type="danger" size="small">滞留超48小时</el-tag>
+                  <el-tag v-else type="success" size="small" effect="plain">在港</el-tag>
+                </template>
               </el-table-column>
             </el-table>
           </el-card>
@@ -134,6 +171,7 @@ watch(vesselId, bootstrap);
           >
             <div class="timeline-row">
               <el-tag size="small" :type="call.type === '进港' ? 'primary' : 'success'">{{ call.type }}</el-tag>
+              <span>{{ portStore.portById(call.portId)?.name ?? '未知渔港' }}</span>
               <span>泊位 {{ call.berthNo }}</span>
               <span>加冰 {{ formatNumber(call.iceKg, 0) }} kg</span>
               <span>加油 {{ formatNumber(call.fuelL, 0) }} L</span>
@@ -189,6 +227,16 @@ watch(vesselId, bootstrap);
 .card-title {
   font-weight: 600;
   color: #17324d;
+}
+.overstay-tag {
+  margin-left: 10px;
+}
+.overstay-alert {
+  margin-bottom: 10px;
+}
+.overstay-text {
+  color: #f56c6c;
+  font-weight: 600;
 }
 .timeline-row {
   display: flex;

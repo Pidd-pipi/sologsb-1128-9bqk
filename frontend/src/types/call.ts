@@ -8,7 +8,11 @@ export type VisaStatus = '已签证' | '待签证' | '免签';
 
 export const VISA_STATUSES: VisaStatus[] = ['已签证', '待签证', '免签'];
 
-/** 进出港记录 */
+/**
+ * 进出港记录。
+ * 一条记录同时写渔船、时间与泊位：进港记录即该泊位当前占用的来源（Berth.entryCallId），
+ * 出港记录确认占用者本人离泊后释放泊位——流水与泊位占用始终是同一笔数据。
+ */
 export interface PortCall {
   id: string;
   /** 渔船 id */
@@ -19,6 +23,8 @@ export interface PortCall {
   type: CallType;
   /** 时间（ISO 字符串） */
   time: string;
+  /** 渔港 id（与 berthNo 共同确定唯一泊位） */
+  portId: string;
   /** 泊位号 */
   berthNo: string;
   /** 加冰 kg */
@@ -37,6 +43,8 @@ export interface CallDraft {
   vesselId: string;
   type: CallType;
   time: string;
+  /** 渔港 id（表单里选中的泊位所属渔港） */
+  portId: string;
   berthNo: string;
   iceKg: number;
   fuelL: number;
@@ -44,11 +52,12 @@ export interface CallDraft {
   visaStatus: VisaStatus;
 }
 
-export function emptyCallDraft(berthNo = ''): CallDraft {
+export function emptyCallDraft(berthNo = '', portId = ''): CallDraft {
   return {
     vesselId: '',
     type: '进港',
     time: '',
+    portId,
     berthNo,
     iceKg: 0,
     fuelL: 0,

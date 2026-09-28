@@ -7,7 +7,8 @@ import { buildBerthRecords } from './berth';
 
 /**
  * gbfishport-db：库名固定为 gbfishport-db
- * v1 建 ports / vessels；v2 新增 calls 表与 vesselId 索引；v3 新增 berths 表并按泊位数生成初始记录。
+ * v1 建 ports / vessels；v2 新增 calls 表与 vesselId 索引；v3 新增 berths 表并按泊位数生成初始记录；
+ * v4 进出港记录与泊位占用绑定：calls 增 portId 索引、berths 增 entryCallId 索引，并回填历史数据。
  */
 export class FishPortDatabase extends Dexie {
   ports!: Table<FishingPort, string>;
@@ -52,6 +53,55 @@ export class FishPortDatabase extends Dexie {
             await berthTable.bulkPut(buildBerthRecords(port));
           }
         }
+      });
+
+    this.version(4)
+      .stores({
+        calls: 'id, vesselId, type, time, portId',
+        berths: 'id, portId, berthNo, status, vesselId, entryCallId',
+      })
+      .upgrade(async (tx) => {
+        const callTable = tx.table<PortCall, string>('calls');
+        const berthTable = tx.table<Berth, string>('berths');
+        const portTable = tx.table<FishingPort, string>('ports');
+        const vesselTable = tx.table<FishingVessel, string>('vessels');
+
+        const [ports, vessels, berths, calls] = await Promise.all([
+          portTable.toArray(),
+          vesselTable.toArray(),
+          berthTable.toArray(),
+          callTable.toArray(),
+        ]);
+
+        // 回填 calls.portId：优先按“当前仍占用同号泊位”匹配，其次用船籍港名称匹配渔港，最后回退同号泊位
+        const callsNext = calls.map((call) => {
+          if (call.portId) return call;
+          const byOccupant = berths.find((b) => b.berthNo === call.berthNo && b.vesselId === call.vesselId);
+          if (byOccupant) return { ...call, portId: byOccupant.portId };
+          const vessel = vessels.find((v) => v.id === call.vesselId);
+          if (vessel) {
+            const byHomePort = ports.find((p) => p.name.includes(vessel.homePort));
+            if (byHomePort) return { ...call, portId: byHomePort.id };
+          }
+          const byBerthNo = berths.find((b) => b.berthNo === call.berthNo);
+          return { ...call, portId: byBerthNo?.portId ?? '' };
+        });
+        await callTable.bulkPut(callsNext);
+
+        // 回填 berths.entryCallId：把占用泊位指向同船同泊位的最近一条进港记录，靠泊时间以该记录为准；
+        // 空闲 / 维修泊位显式置空，补齐老记录缺失的字段
+        const berthsNext = berths.map((berth) => {
+          if (berth.status !== '占用' || !berth.vesselId) {
+            return { ...berth, entryCallId: null };
+          }
+          if (berth.entryCallId) return berth;
+          const entry = [...callsNext]
+            .filter((c) => c.type === '进港' && c.vesselId === berth.vesselId && c.portId === berth.portId && c.berthNo === berth.berthNo)
+            .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())[0];
+          if (!entry) return { ...berth, entryCallId: null };
+          return { ...berth, entryCallId: entry.id, berthAt: entry.time };
+        });
+        await berthTable.bulkPut(berthsNext);
       });
   }
 }

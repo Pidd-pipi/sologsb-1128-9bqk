@@ -77,6 +77,9 @@ function onClick(): void {
       <span>在港船数 <b>{{ summary.inPortCount }}</b></span>
       <span>空闲泊位 <b>{{ summary.free }}</b></span>
       <span>维修泊位 <b>{{ summary.maintenance }}</b></span>
+      <el-tag v-if="summary.overstayCount" type="danger" size="small" effect="dark" data-testid="port-card-overstay">
+        滞留超48小时 {{ summary.overstayCount }}
+      </el-tag>
     </div>
 
     <div class="port-card__supply">

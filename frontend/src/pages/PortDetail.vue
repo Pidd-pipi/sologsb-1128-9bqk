@@ -10,6 +10,7 @@ import BerthGrid from '../components/common/BerthGrid.vue';
 import MapPanel from '../components/common/MapPanel.vue';
 import EmptyState from '../components/common/EmptyState.vue';
 import type { Berth } from '../types/berth';
+import { berthedDurationText, isOverstay } from '../types/berth';
 import { formatDateTime, formatNumber, percentText } from '../utils/format';
 import { supplyText } from '../types/port';
 
@@ -36,10 +37,7 @@ const activeVessel = computed(() =>
 const addBerthVisible = ref(false);
 const addBerthForm = reactive({ berthNo: '', designDepth: 4.5 });
 
-const recentCalls = computed(() => {
-  const numbers = new Set(portBerths.value.map((b) => b.berthNo));
-  return portStore.callsSorted.filter((c) => numbers.has(c.berthNo)).slice(0, 8);
-});
+const recentCalls = computed(() => portStore.callsOfPort(portId.value).slice(0, 8));
 
 const supply = computed(() => (port.value ? supplyText(port.value.supply) : '—'));
 
@@ -164,19 +162,55 @@ function onMapSelect(selectedPortId: string): void {
         <EmptyState v-else title="该渔港暂无泊位记录" description="点击右上角「新增泊位」为该渔港建立泊位清单。">
           <el-button type="primary" @click="addBerthVisible = true">新增泊位</el-button>
         </EmptyState>
+        <p v-if="summary.overstayCount" class="overstay-bar" data-testid="grid-overstay-bar">
+          {{ summary.overstayCount }} 个泊位靠泊超过 48 小时（红框 / 滞留角标），请及时处理
+        </p>
       </el-card>
 
       <el-row :gutter="16">
         <el-col :lg="12" :md="24">
           <el-card shadow="never" class="detail-card">
-            <template #header><span class="card-title">在港船舶（{{ inPortVessels.length }} 艘）</span></template>
-            <el-table :data="inPortVessels" size="small" border empty-text="当前无在港船舶">
+            <template #header>
+              <span class="card-title">在港船舶（{{ inPortVessels.length }} 艘）</span>
+              <el-tag
+                v-if="summary.overstayCount"
+                type="danger"
+                size="small"
+                effect="dark"
+                class="overstay-tag"
+                data-testid="overstay-tag"
+              >
+                {{ summary.overstayCount }} 艘滞留超 48 小时
+              </el-tag>
+            </template>
+            <el-alert
+              v-if="summary.overstayCount"
+              type="error"
+              :closable="false"
+              show-icon
+              class="overstay-alert"
+              title="以下船舶靠泊已超过 48 小时，请跟进滞留原因"
+            />
+            <el-table :data="inPortVessels" size="small" border empty-text="当前无在港船舶" data-testid="inport-table">
               <el-table-column prop="vesselName" label="船名" min-width="120" />
               <el-table-column prop="berthNo" label="泊位号" width="90" />
-              <el-table-column label="靠泊时间" min-width="150">
+              <el-table-column label="靠泊起始时间" min-width="150">
                 <template #default="scope">{{ formatDateTime(scope.row.berthAt) }}</template>
               </el-table-column>
-              <el-table-column label="操作" width="100">
+              <el-table-column label="靠泊时长" width="120">
+                <template #default="scope">
+                  <span :class="{ 'overstay-text': isOverstay(scope.row.berthAt) }" data-testid="berth-duration">
+                    {{ berthedDurationText(scope.row.berthAt) }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="100">
+                <template #default="scope">
+                  <el-tag v-if="isOverstay(scope.row.berthAt)" type="danger" size="small">滞留超48小时</el-tag>
+                  <el-tag v-else type="success" size="small" effect="plain">正常</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="90">
                 <template #default="scope">
                   <el-button
                     text
@@ -206,8 +240,7 @@ function onMapSelect(selectedPortId: string): void {
               <el-table-column label="卸货 kg" min-width="100">
                 <template #default="scope">{{ formatNumber(scope.row.unloadKg, 0) }}</template>
               </el-table-column>
-            </el-table>
-          </el-card>
+            </el-table>          </el-card>
         </el-col>
       </el-row>
     </template>
@@ -239,7 +272,25 @@ function onMapSelect(selectedPortId: string): void {
             <template v-else>—</template>
           </el-descriptions-item>
           <el-descriptions-item label="靠泊时间">{{ formatDateTime(activeBerth.berthAt) }}</el-descriptions-item>
+          <el-descriptions-item label="靠泊时长">
+            <span :class="{ 'overstay-text': isOverstay(activeBerth.berthAt) }">
+              {{ berthedDurationText(activeBerth.berthAt) }}
+            </span>
+            <el-tag
+              v-if="activeBerth.status === '占用' && isOverstay(activeBerth.berthAt)"
+              type="danger"
+              size="small"
+              style="margin-left: 8px"
+              data-testid="berth-dialog-overstay"
+            >
+              滞留超48小时
+            </el-tag>
+          </el-descriptions-item>
           <el-descriptions-item label="离泊时间">{{ formatDateTime(activeBerth.leaveAt) }}</el-descriptions-item>
+          <el-descriptions-item label="进港记录">
+            <span v-if="activeBerth.entryCallId" class="record-link-text">已与流水 {{ activeBerth.entryCallId }} 绑定</span>
+            <span v-else>—</span>
+          </el-descriptions-item>
           <el-descriptions-item label="主机功率">
             {{ activeVessel ? `${formatNumber(activeVessel.enginePower, 0)} kW` : '—' }}
           </el-descriptions-item>
@@ -311,5 +362,27 @@ function onMapSelect(selectedPortId: string): void {
   margin: 10px 0 0;
   font-size: 12px;
   color: #6b7c8c;
+}
+.overstay-text {
+  color: #f56c6c;
+  font-weight: 600;
+}
+.overstay-tag {
+  margin-left: 10px;
+}
+.overstay-alert {
+  margin-bottom: 10px;
+}
+.overstay-bar {
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #f56c6c;
+  background: #fef0f0;
+  border-radius: 8px;
+}
+.record-link-text {
+  font-size: 12px;
+  color: #7b8a99;
 }
 </style>

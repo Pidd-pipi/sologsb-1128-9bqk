@@ -167,7 +167,7 @@ export const SEED_VESSELS: FishingVessel[] = [
   },
 ];
 
-/** 初始进出港流水 */
+/** 初始进出港流水（portId + berthNo 与泊位占用记录同源） */
 export const SEED_CALLS: PortCall[] = [
   {
     id: 'c-3001',
@@ -175,6 +175,7 @@ export const SEED_CALLS: PortCall[] = [
     vesselName: '浙象渔05123',
     type: '进港',
     time: hoursAgo(5),
+    portId: 'p-1001',
     berthNo: 'B01',
     iceKg: 1200,
     fuelL: 800,
@@ -188,6 +189,7 @@ export const SEED_CALLS: PortCall[] = [
     vesselName: '浙象渔05288',
     type: '进港',
     time: hoursAgo(3),
+    portId: 'p-1001',
     berthNo: 'B02',
     iceKg: 900,
     fuelL: 1200,
@@ -201,6 +203,7 @@ export const SEED_CALLS: PortCall[] = [
     vesselName: '浙普渔13208',
     type: '进港',
     time: hoursAgo(2),
+    portId: 'p-1002',
     berthNo: 'B01',
     iceKg: 600,
     fuelL: 0,
@@ -214,6 +217,7 @@ export const SEED_CALLS: PortCall[] = [
     vesselName: '浙岱渔07156',
     type: '进港',
     time: hoursAgo(1),
+    portId: 'p-1003',
     berthNo: 'B01',
     iceKg: 300,
     fuelL: 260,
@@ -227,6 +231,7 @@ export const SEED_CALLS: PortCall[] = [
     vesselName: '浙岭渔09342',
     type: '出港',
     time: daysAgo(1),
+    portId: 'p-1004',
     berthNo: 'B02',
     iceKg: 0,
     fuelL: 420,
@@ -235,17 +240,19 @@ export const SEED_CALLS: PortCall[] = [
     createdAt: daysAgo(1),
   },
   {
+    // 与沈家门 B02 泊位占用同一条记录：靠泊已 50 小时，用于演示 48 小时滞留提示
     id: 'c-3006',
     vesselId: 'v-2006',
     vesselName: '浙普渔13566',
     type: '进港',
-    time: daysAgo(1),
+    time: hoursAgo(50),
+    portId: 'p-1002',
     berthNo: 'B02',
     iceKg: 480,
     fuelL: 300,
     unloadKg: 3600,
     visaStatus: '已签证',
-    createdAt: daysAgo(1),
+    createdAt: hoursAgo(50),
   },
   {
     id: 'c-3007',
@@ -253,6 +260,7 @@ export const SEED_CALLS: PortCall[] = [
     vesselName: '浙象渔05123',
     type: '出港',
     time: daysAgo(2),
+    portId: 'p-1001',
     berthNo: 'B01',
     iceKg: 0,
     fuelL: 950,
@@ -266,6 +274,7 @@ export const SEED_CALLS: PortCall[] = [
     vesselName: '浙普渔13208',
     type: '出港',
     time: daysAgo(4),
+    portId: 'p-1002',
     berthNo: 'B03',
     iceKg: 200,
     fuelL: 540,

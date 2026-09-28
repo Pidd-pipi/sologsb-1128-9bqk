@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
+import { liveQuery } from 'dexie';
 import { db } from '../db';
 import { toPlain, uid } from '../utils/format';
 import { emptyVesselQuery, type FishingVessel, type VesselQuery } from '../types/vessel';
@@ -105,3 +106,14 @@ export const useVesselStore = defineStore('vessel', () => {
     updateVessel,
   };
 });
+
+/** 订阅渔船档案变更（含其他标签页），实时回灌 store */
+export function startVesselRealtimeSync(): () => void {
+  const sub = liveQuery(() => db.vessels.toArray()).subscribe({
+    next: (rows) => {
+      useVesselStore().vessels = rows;
+    },
+    error: (err) => console.warn('[gbfishport] 渔船实时同步失败：', err),
+  });
+  return () => sub.unsubscribe();
+}

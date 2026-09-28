@@ -1,5 +1,6 @@
 import { computed, type ComputedRef, type Ref } from 'vue';
 import type { Berth, BerthSummary } from '../types/berth';
+import { isOverstay } from '../types/berth';
 
 export interface UseBerthStatus {
   scope: ComputedRef<Berth[]>;
@@ -15,6 +16,8 @@ function summarize(portId: string, list: Berth[]): BerthSummary {
   const occupied = list.filter((b) => b.status === '占用').length;
   const maintenance = list.filter((b) => b.status === '维修').length;
   const free = total - occupied - maintenance;
+  const occupiedBerths = list.filter((b) => b.status === '占用');
+  const overstayBerths = occupiedBerths.filter((b) => isOverstay(b.berthAt));
   return {
     portId,
     total,
@@ -23,13 +26,15 @@ function summarize(portId: string, list: Berth[]): BerthSummary {
     maintenance,
     occupancyRate: total === 0 ? 0 : occupied / total,
     inPortCount: occupied,
+    overstayCount: overstayBerths.length,
     freeBerths: list.filter((b) => b.status === '空闲'),
-    occupiedBerths: list.filter((b) => b.status === '占用'),
+    occupiedBerths,
+    overstayBerths,
   };
 }
 
 /**
- * 聚合泊位占用与在港船舶数量，输出占用率与空闲泊位列表。
+ * 聚合泊位占用与在港船舶数量，输出占用率、空闲泊位列表与 48 小时滞留清单。
  * @param berths 泊位响应式数据源（一般来自 portStore）
  * @param portId 需要聚焦的渔港 id；不传则对全部泊位聚合
  */

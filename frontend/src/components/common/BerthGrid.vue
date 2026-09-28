@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import type { Berth, BerthStatus } from '../../types/berth';
+import { berthedDurationText, isOverstay } from '../../types/berth';
 import { formatNumber } from '../../utils/format';
 
 const props = withDefaults(
@@ -16,7 +17,7 @@ const props = withDefaults(
 const emit = defineEmits<{ (e: 'select', berth: Berth): void }>();
 
 const CELL_W = 120;
-const CELL_H = 78;
+const CELL_H = 94;
 const GAP = 12;
 const PAD = 14;
 
@@ -44,10 +45,35 @@ const legend = computed(() =>
   })),
 );
 
+/** 超过 48 小时滞留的占用泊位数（与列表 / 渔船档案读同一条占用记录） */
+const overstayCount = computed(() => props.berths.filter((b) => isOverstay(b.berthAt)).length);
+
 function cellAt(index: number): { x: number; y: number } {
   const row = Math.floor(index / props.perRow);
   const col = index % props.perRow;
   return { x: PAD + col * (CELL_W + GAP), y: PAD + row * (CELL_H + GAP) };
+}
+
+function strokeOf(berth: Berth): string {
+  if (props.highlightBerthNo === berth.berthNo) return '#409eff';
+  if (isOverstay(berth.berthAt)) return '#f56c6c';
+  return COLORS[berth.status];
+}
+
+function strokeWidthOf(berth: Berth): number {
+  if (props.highlightBerthNo === berth.berthNo) return 3;
+  if (isOverstay(berth.berthAt)) return 2.2;
+  return 1.5;
+}
+
+function tooltipOf(berth: Berth): string {
+  const parts = [berth.berthNo, berth.status];
+  if (berth.vesselName) parts.push(berth.vesselName);
+  if (berth.status === '占用') {
+    parts.push(`靠泊 ${berthedDurationText(berth.berthAt)}`);
+    if (isOverstay(berth.berthAt)) parts.push('滞留超48小时');
+  }
+  return parts.join(' · ');
 }
 
 function onSelect(berth: Berth): void {
@@ -71,30 +97,64 @@ function onSelect(berth: Berth): void {
           :height="CELL_H"
           rx="10"
           :fill="FILLS[berth.status]"
-          :stroke="highlightBerthNo === berth.berthNo ? '#409eff' : COLORS[berth.status]"
-          :stroke-width="highlightBerthNo === berth.berthNo ? 3 : 1.5"
+          :stroke="strokeOf(berth)"
+          :stroke-width="strokeWidthOf(berth)"
           class="berth-grid__cell"
           :class="{ 'berth-grid__cell--selectable': selectable }"
           :data-testid="`berth-cell-${berth.berthNo}`"
           :data-berth-no="berth.berthNo"
           :data-status="berth.status"
+          :data-overstay="isOverstay(berth.berthAt) ? 'true' : 'false'"
           @click="onSelect(berth)"
         >
-          <title>{{ `${berth.berthNo} · ${berth.status}${berth.vesselName ? ' · ' + berth.vesselName : ''}` }}</title>
+          <title>{{ tooltipOf(berth) }}</title>
         </rect>
         <text
           :x="cellAt(index).x + 12"
-          :y="cellAt(index).y + 26"
+          :y="cellAt(index).y + 24"
           class="berth-grid__no"
           :data-status="berth.status"
         >
           {{ berth.berthNo }}
         </text>
-        <text :x="cellAt(index).x + 12" :y="cellAt(index).y + 46" class="berth-grid__meta">
+        <!-- 滞留角标 -->
+        <g v-if="isOverstay(berth.berthAt)" :data-testid="`berth-overstay-${berth.berthNo}`">
+          <rect
+            :x="cellAt(index).x + CELL_W - 42"
+            :y="cellAt(index).y + 8"
+            width="34"
+            height="16"
+            rx="8"
+            fill="#f56c6c"
+          />
+          <text
+            :x="cellAt(index).x + CELL_W - 25"
+            :y="cellAt(index).y + 20"
+            class="berth-grid__badge"
+            text-anchor="middle"
+          >
+            滞留
+          </text>
+        </g>
+        <text
+          :x="cellAt(index).x + 12"
+          :y="cellAt(index).y + 44"
+          class="berth-grid__meta"
+        >
           {{ berth.status }} · 水深 {{ formatNumber(berth.designDepth) }}m
         </text>
         <text :x="cellAt(index).x + 12" :y="cellAt(index).y + 64" class="berth-grid__vessel">
           {{ berth.status === '占用' ? berth.vesselName || '未知船舶' : '—' }}
+        </text>
+        <text
+          v-if="berth.status === '占用'"
+          :x="cellAt(index).x + 12"
+          :y="cellAt(index).y + 82"
+          class="berth-grid__time"
+          :class="{ 'berth-grid__time--overstay': isOverstay(berth.berthAt) }"
+          :data-testid="`berth-duration-${berth.berthNo}`"
+        >
+          靠泊 {{ berthedDurationText(berth.berthAt) }}
         </text>
       </g>
     </svg>
@@ -102,6 +162,10 @@ function onSelect(berth: Berth): void {
       <span v-for="item in legend" :key="item.status" class="berth-grid__legend-item">
         <i class="berth-grid__dot" :style="{ background: item.color }"></i>
         {{ item.status }} {{ item.count }}
+      </span>
+      <span v-if="overstayCount" class="berth-grid__legend-item berth-grid__legend-item--overstay" data-testid="berth-overstay-legend">
+        <i class="berth-grid__dot" :style="{ background: '#f56c6c' }"></i>
+        滞留超48小时 {{ overstayCount }}
       </span>
     </div>
   </div>
@@ -137,6 +201,19 @@ function onSelect(berth: Berth): void {
   font-size: 11px;
   fill: #3d5670;
 }
+.berth-grid__time {
+  font-size: 10px;
+  fill: #8592a0;
+}
+.berth-grid__time--overstay {
+  font-weight: 700;
+  fill: #f56c6c;
+}
+.berth-grid__badge {
+  font-size: 9px;
+  font-weight: 700;
+  fill: #ffffff;
+}
 .berth-grid__legend {
   display: flex;
   gap: 16px;
@@ -148,6 +225,10 @@ function onSelect(berth: Berth): void {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+}
+.berth-grid__legend-item--overstay {
+  color: #f56c6c;
+  font-weight: 600;
 }
 .berth-grid__dot {
   width: 9px;
